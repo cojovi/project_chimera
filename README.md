@@ -1,30 +1,44 @@
 # PROTOCOL CHIMERA
 
-A single-operator dead man's switch. Files are stored AES-256-GCM encrypted in a
-private Supabase Storage bucket. A server-side timer (pg_cron, every minute)
-checks the deadline — if the operator fails to check in before T-zero, the
-payload is decrypted server-side and emailed to the designated recipient (+CCs)
-via Resend. The switch fires whether or not any browser is open.
+A dead man's switch. Upload files, set a check-in interval, arm the switch. Miss
+a check-in and your encrypted payload is decrypted server-side and emailed to
+whoever you designated. The timer runs on a server, not in your browser — it
+fires whether or not anything is open.
 
-## How it works
+## Branches
 
-1. Visit the site → giant countdown. Enter the authorization code to check in
-   (resets the clock) and open the management console.
-2. Console: arm/disarm, set the check-in interval (24h → 1 year), upload/remove
-   payload files, set recipient + CC addresses, edit the release email, send a
-   test transmission, rotate the code.
-3. Miss a check-in while armed → `check-switch` edge function fires the email
-   and marks the switch `triggered`.
+| | `main` | `multiple` (this branch) |
+|---|---|---|
+| Users | one operator | unlimited accounts |
+| Auth | single password | email + passphrase (Supabase Auth) |
+| Landing | countdown + password box | public wall of all armed timers + login |
+| Check-in | typing the password | CHECK IN button in your console |
+
+Both branches share one Supabase project; the multi-user schema is additive so
+`main` continues to work unchanged.
+
+## How it works (multi-user)
+
+1. Landing page shows a live wall of every armed switch by callsign, plus four
+   mock protocols so it never looks empty.
+2. Enlist with email + callsign + passphrase, or log in.
+3. Console: check in, arm/disarm, set interval (24h → 1 year), upload payload
+   files, set recipient + CCs, edit the release email, pick your callsign and
+   whether you appear on the wall, rotate your passphrase.
+4. At **10% time remaining** you get one reminder email per cycle. Miss T-zero
+   and the payload goes out; the switch marks itself expended.
 
 ## Stack
 
-- Frontend: Vite + React + TypeScript + Tailwind + Framer Motion (static, deploys to Vercel)
-- Backend: Supabase project `znnpklgdfgnnwrnvufgr` (`project-chimera`)
-  - Postgres `switch_state` / `payload_files` (RLS: service-role only)
-  - Edge functions `switch-api` (password-gated API) and `check-switch` (cron trigger)
-  - pg_cron job `chimera-check-switch` every minute
+- Frontend: Vite + React + TypeScript + Tailwind + Framer Motion (static → Vercel)
+- Backend: Supabase project `znnpklgdfgnnwrnvufgr`
+  - Auth for accounts; `profiles` / `switches` / `user_payload_files` tables
+    (RLS: service-role only — all access via edge functions)
+  - Edge functions: `wall` (public feed + signup), `user-api` (per-user,
+    JWT-scoped), `check-switch-multi` (cron)
+  - pg_cron job `chimera-check-multi` every minute
   - Secrets in Supabase Vault (Resend key, AES key, cron secret)
-- Email: Resend
+- Email: Resend, sending from `chimera@cojovi.com`
 
 ## Develop
 
@@ -33,19 +47,14 @@ npm install
 npm run dev
 ```
 
-First time after the rebuild? Run `bash cleanup.sh` once to purge legacy files.
-
 ## Deploy
 
-Push to a git repo and import into Vercel (framework auto-detected), or
-`npx vercel --prod`. No env vars strictly required — the Supabase URL is baked
-in with `VITE_SUPABASE_URL` as an override.
+Push and import into Vercel (framework auto-detected), or `npx vercel --prod`.
 
-## Important notes
+## Notes
 
-- Resend without a verified domain sends from `onboarding@resend.dev` and only
-  delivers to the email address on the Resend account. Verify a domain in the
-  Resend dashboard (then update the `FROM_EMAIL` Vault secret) to send to
-  arbitrary recipients.
-- The switch ships **disarmed**. Arm it from the console.
-- Payload limits: 10 MB/file, 20 files.
+- **Signup is currently open** to anyone who reaches the URL. Add an invite
+  code or allowlist before putting this on a public domain.
+- Payload limits: 10 MB per file, 20 files per user.
+- Mock timers live in the `mock_timers` table — delete those rows once you have
+  enough real operators on the wall.

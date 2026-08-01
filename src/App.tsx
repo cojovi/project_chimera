@@ -1,44 +1,53 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
+import type { Session } from '@supabase/supabase-js';
+import { supabase } from './lib/supabase';
 import * as api from './lib/api';
-import type { PublicStatus, SwitchConfig, SwitchStatus } from './lib/api';
+import type { UserConfig, WallTimer } from './lib/api';
 import { remainingUntil } from './lib/time';
 import Countdown, { urgencyOf } from './components/Countdown';
-import PasswordGate from './components/PasswordGate';
+import TimerWall from './components/TimerWall';
+import AuthPanel from './components/AuthPanel';
 import Console from './components/Console';
 
-type View = 'boot' | 'locked' | 'unlocked';
-
-const STATUS_LINE: Record<SwitchStatus, string> = {
-  armed: 'SWITCH ARMED — CHECK-IN REQUIRED BEFORE T-ZERO',
-  disarmed: 'SWITCH DISARMED — CLOCK SUSPENDED',
-  triggered: 'FAILSAFE EXECUTED — PAYLOAD DELIVERED TO DESIGNATED RECIPIENTS'
-};
-
 const App: React.FC = () => {
-  const [view, setView] = useState<View>('boot');
-  const [pub, setPub] = useState<PublicStatus | null>(null);
-  const [config, setConfig] = useState<SwitchConfig | null>(null);
-  const [password, setPassword] = useState('');
+  const [session, setSession] = useState<Session | null>(null);
+  const [booted, setBooted] = useState(false);
+  const [timers, setTimers] = useState<WallTimer[]>([]);
+  const [config, setConfig] = useState<UserConfig | null>(null);
   const [offline, setOffline] = useState(false);
   const [now, setNow] = useState(Date.now());
   const offsetRef = useRef(0);
 
-  const refreshStatus = useCallback(async () => {
+  const refreshFeed = useCallback(async () => {
     try {
-      const s = await api.getStatus();
-      offsetRef.current = new Date(s.server_time).getTime() - Date.now();
-      setPub(s);
+      const feed = await api.getFeed();
+      offsetRef.current = new Date(feed.server_time).getTime() - Date.now();
+      setTimers(feed.timers);
       setOffline(false);
     } catch {
       setOffline(true);
     }
   }, []);
 
-  // boot: fetch public status
+  // auth session tracking
   useEffect(() => {
-    void refreshStatus().then(() => setView((v) => (v === 'boot' ? 'locked' : v)));
-  }, [refreshStatus]);
+    void supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setBooted(true);
+    });
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, s) => setSession(s));
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  // load config when authed; clear when not
+  useEffect(() => {
+    if (session) {
+      void api.getConfig().then(setConfig).catch(() => setConfig(null));
+    } else {
+      setConfig(null);
+    }
+  }, [session]);
 
   // clock tick
   useEffect(() => {
@@ -46,58 +55,43 @@ const App: React.FC = () => {
     return () => clearInterval(t);
   }, []);
 
-  // poll public status while locked
+  // feed refresh on landing
   useEffect(() => {
-    if (view !== 'locked') return;
-    const t = setInterval(() => void refreshStatus(), 30_000);
+    void refreshFeed();
+    if (session) return;
+    const t = setInterval(() => void refreshFeed(), 60_000);
     return () => clearInterval(t);
-  }, [view, refreshStatus]);
+  }, [session, refreshFeed]);
 
-  const status: SwitchStatus = config?.status ?? pub?.status ?? 'disarmed';
-  const nextTriggerAt = config?.next_trigger_at ?? pub?.next_trigger_at;
-  const intervalMinutes = config?.interval_minutes ?? pub?.interval_minutes ?? 1440;
+  const nowMs = now + offsetRef.current;
 
   const remaining = useMemo(
-    () => remainingUntil(nextTriggerAt ? new Date(nextTriggerAt) : new Date(), now + offsetRef.current),
-    [nextTriggerAt, now]
+    () => remainingUntil(config ? new Date(config.next_trigger_at) : new Date(), nowMs),
+    [config, nowMs]
   );
-  const urgency = urgencyOf(remaining, intervalMinutes);
+  const urgency = config ? urgencyOf(remaining, config.interval_minutes) : 'normal';
 
-  const handleUnlock = useCallback(async (pw: string) => {
-    const cfg = await api.checkin(pw);
-    setPassword(pw);
-    setConfig(cfg);
-    setView('unlocked');
-  }, []);
+  const handleLogout = useCallback(() => {
+    void api.logout();
+    void refreshFeed();
+  }, [refreshFeed]);
 
-  const handleLock = useCallback(() => {
-    setPassword('');
-    setConfig(null);
-    setView('locked');
-    void refreshStatus();
-  }, [refreshStatus]);
-
-  const handleConfig = useCallback((c: SwitchConfig) => setConfig(c), []);
-
-  const lampColor =
-    status === 'triggered'
+  const lampColor = !config
+    ? 'bg-amber'
+    : config.status === 'triggered'
       ? 'bg-alarm animate-alarmpulse'
-      : status === 'disarmed'
+      : config.status === 'disarmed'
         ? 'bg-steel-dim'
         : urgency === 'critical'
           ? 'bg-alarm animate-alarmpulse'
-          : urgency === 'warning'
-            ? 'bg-orange-400'
-            : 'bg-armed';
+          : 'bg-armed';
 
   return (
     <div className="crt relative flex min-h-screen flex-col">
-      {/* Classification strip */}
       <div className="border-b border-edge bg-panel/60 py-1 text-center font-display text-[0.5rem] tracking-[0.5em] text-steel-dim">
-        EYES ONLY // SINGLE OPERATOR FAILSAFE // UNAUTHORIZED ACCESS IS LOGGED
+        AUTOMATED FAILSAFE NETWORK // MISS A CHECK-IN AND THE PAYLOAD FLIES
       </div>
 
-      {/* Header */}
       <header className="flex items-center justify-between px-6 py-5 sm:px-10">
         <div className="flex items-center gap-3">
           <span className={`h-2.5 w-2.5 rounded-full ${lampColor}`} />
@@ -106,13 +100,19 @@ const App: React.FC = () => {
           </h1>
         </div>
         <div className="hidden font-mono text-[0.65rem] tracking-[0.2em] text-steel-dim sm:block">
-          {offline ? <span className="text-alarm">LINK DOWN — RETRYING</span> : 'UPLINK NOMINAL'}
+          {offline ? (
+            <span className="text-alarm">LINK DOWN — RETRYING</span>
+          ) : session ? (
+            `OPERATOR ${config?.callsign ?? '…'}`
+          ) : (
+            'UPLINK NOMINAL'
+          )}
         </div>
       </header>
 
       <main className="flex flex-1 flex-col items-center px-4 sm:px-10">
         <AnimatePresence mode="wait">
-          {view === 'boot' && (
+          {!booted && (
             <motion.div
               key="boot"
               className="flex flex-1 items-center font-mono text-xs tracking-[0.4em] text-steel-dim"
@@ -122,77 +122,73 @@ const App: React.FC = () => {
             </motion.div>
           )}
 
-          {view === 'locked' && (
+          {booted && !session && (
             <motion.div
-              key="locked"
-              className="flex w-full flex-1 flex-col items-center justify-center gap-12 py-10"
+              key="landing"
+              className="flex w-full max-w-6xl flex-1 flex-col items-center gap-10 py-8"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0, transition: { duration: 0.25 } }}
             >
               <div className="text-center">
-                <Countdown
-                  remaining={remaining}
-                  status={status}
-                  urgency={urgency}
-                  intervalMinutes={intervalMinutes}
-                />
+                <motion.h2
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.6 }}
+                  className="font-display text-[clamp(1.2rem,3.5vw,2.4rem)] tracking-[0.25em] text-steel"
+                >
+                  IF THE CLOCK HITS ZERO, <span className="text-amber glow-amber">IT SENDS</span>
+                </motion.h2>
                 <motion.p
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
-                  transition={{ delay: 0.4 }}
-                  className={`mt-6 font-mono text-[0.7rem] tracking-[0.3em] ${
-                    status === 'triggered' ? 'text-alarm' : 'text-steel-dim'
-                  }`}
+                  transition={{ delay: 0.3 }}
+                  className="mt-3 font-mono text-[0.7rem] tracking-[0.25em] text-steel-dim"
                 >
-                  {STATUS_LINE[status]}
+                  ENCRYPTED PAYLOADS · SERVER-SIDE TIMERS · AUTOMATIC RELEASE
                 </motion.p>
               </div>
-              <PasswordGate onSubmit={handleUnlock} />
+
+              <TimerWall timers={timers} nowMs={nowMs} />
+
+              <AuthPanel onAuthed={() => void refreshFeed()} />
             </motion.div>
           )}
 
-          {view === 'unlocked' && config && (
+          {booted && session && config && (
             <motion.div
-              key="unlocked"
+              key="console"
               className="w-full py-6"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0, transition: { duration: 0.25 } }}
             >
-              {/* compact countdown strip */}
-              <div className="mx-auto mb-6 flex w-full max-w-3xl items-center justify-between border border-edge bg-panel/70 px-5 py-3 backdrop-blur">
-                <span className="font-display text-[0.55rem] tracking-[0.35em] text-steel-dim">
-                  TIME TO T-ZERO
-                </span>
-                <span
-                  className={`tabular font-mono text-lg font-bold ${
-                    status !== 'armed'
-                      ? 'text-steel-dim'
-                      : urgency === 'critical'
-                        ? 'text-alarm glow-red'
-                        : 'text-amber glow-amber'
-                  }`}
-                >
-                  {status === 'triggered'
-                    ? 'EXPENDED'
-                    : `${String(remaining.days).padStart(2, '0')}:${String(remaining.hours).padStart(2, '0')}:${String(remaining.minutes).padStart(2, '0')}:${String(remaining.seconds).padStart(2, '0')}`}
-                </span>
+              <div className="mx-auto mb-8 max-w-3xl">
+                <Countdown
+                  remaining={remaining}
+                  status={config.status}
+                  urgency={urgency}
+                  intervalMinutes={config.interval_minutes}
+                />
               </div>
-              <Console
-                password={password}
-                config={config}
-                onConfig={handleConfig}
-                onLock={handleLock}
-              />
+              <Console config={config} onConfig={setConfig} onLogout={handleLogout} />
+            </motion.div>
+          )}
+
+          {booted && session && !config && (
+            <motion.div
+              key="loading-config"
+              className="flex flex-1 items-center font-mono text-xs tracking-[0.4em] text-steel-dim"
+              exit={{ opacity: 0 }}
+            >
+              LOADING SWITCH STATE<span className="animate-blink">_</span>
             </motion.div>
           )}
         </AnimatePresence>
       </main>
 
-      {/* Footer */}
       <footer className="flex items-center justify-between border-t border-edge px-6 py-3 font-mono text-[0.6rem] tracking-[0.25em] text-steel-faint sm:px-10">
-        <span>PROJECT CHIMERA v1.0</span>
+        <span>PROJECT CHIMERA v2.0</span>
         <span className="hidden sm:inline">SERVER-SIDE FAILSAFE · AES-256 VAULT · RESEND RELAY</span>
         <span>{new Date(now).toUTCString().slice(17, 25)} UTC</span>
       </footer>

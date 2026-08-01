@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import {
   ShieldCheck,
   ShieldOff,
-  Lock,
+  LogOut,
   UploadCloud,
   Trash2,
   Download,
@@ -12,17 +12,18 @@ import {
   RotateCcw,
   Plus,
   X,
-  FileText
+  FileText,
+  Eye,
+  EyeOff
 } from 'lucide-react';
 import * as api from '../lib/api';
-import type { SwitchConfig } from '../lib/api';
+import type { UserConfig } from '../lib/api';
 import { formatBytes, formatInterval, formatStamp } from '../lib/time';
 
 interface Props {
-  password: string;
-  config: SwitchConfig;
-  onConfig: (c: SwitchConfig) => void;
-  onLock: () => void;
+  config: UserConfig;
+  onConfig: (c: UserConfig) => void;
+  onLogout: () => void;
 }
 
 const INTERVALS: { label: string; minutes: number }[] = [
@@ -74,7 +75,7 @@ const inputCls =
 const btnCls =
   'inline-flex items-center gap-2 border px-4 py-2 font-display text-[0.6rem] tracking-[0.25em] transition-colors disabled:opacity-30';
 
-const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
+const Console: React.FC<Props> = ({ config, onConfig, onLogout }) => {
   const [busy, setBusy] = useState<string | null>(null);
   const [notice, setNotice] = useState<{ text: string; bad?: boolean } | null>(null);
 
@@ -85,6 +86,8 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
   const [subject, setSubject] = useState(config.email_subject);
   const [message, setMessage] = useState(config.email_message);
   const [customInterval, setCustomInterval] = useState('');
+  const [callsign, setCallsign] = useState(config.callsign);
+  const [showOnWall, setShowOnWall] = useState(config.show_on_wall);
   const [newPass, setNewPass] = useState('');
   const [newPass2, setNewPass2] = useState('');
   const [dragOver, setDragOver] = useState(false);
@@ -118,7 +121,7 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
     void run('upload', async () => {
       let latest = config;
       for (const f of list) {
-        latest = await api.uploadFile(password, f);
+        latest = await api.uploadFile(f);
       }
       onConfig(latest);
       flash(`${list.length} FILE(S) SECURED IN ENCRYPTED VAULT`);
@@ -154,7 +157,7 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
                 armed ? 'text-armed glow-green' : config.status === 'triggered' ? 'text-alarm' : 'text-steel'
               }`}
             >
-              {config.status.toUpperCase()}
+              {config.callsign} :: {config.status.toUpperCase()}
             </div>
             <div className="font-mono text-[0.65rem] text-steel-dim">
               LAST CHECK-IN {formatStamp(config.last_checkin_at)}
@@ -167,7 +170,7 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
             disabled={busy !== null}
             onClick={() =>
               run('checkin', async () => {
-                onConfig(await api.checkin(password));
+                onConfig(await api.checkin());
                 flash('CHECK-IN CONFIRMED — CLOCK RESET');
               })
             }
@@ -180,7 +183,7 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
               disabled={busy !== null}
               onClick={() =>
                 run('disarm', async () => {
-                  onConfig(await api.disarm(password));
+                  onConfig(await api.disarm());
                   flash('SWITCH DISARMED — CLOCK SUSPENDED');
                 })
               }
@@ -193,7 +196,7 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
               disabled={busy !== null}
               onClick={() =>
                 run('arm', async () => {
-                  onConfig(await api.arm(password));
+                  onConfig(await api.arm());
                   flash('SWITCH ARMED — CLOCK RUNNING');
                 })
               }
@@ -203,10 +206,10 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
           )}
           <button
             className={`${btnCls} border-edge text-steel hover:border-steel`}
-            onClick={onLock}
-            title="Lock console"
+            onClick={onLogout}
+            title="Log out"
           >
-            <Lock className="h-3.5 w-3.5" /> LOCK
+            <LogOut className="h-3.5 w-3.5" /> LOG OUT
           </button>
         </div>
       </motion.div>
@@ -231,7 +234,7 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
               disabled={busy !== null}
               onClick={() =>
                 run('interval', async () => {
-                  onConfig(await api.updateConfig(password, { interval_minutes: iv.minutes }));
+                  onConfig(await api.updateConfig({ interval_minutes: iv.minutes }));
                   flash(`INTERVAL SET TO ${iv.label}${armed ? ' — CLOCK RESET' : ''}`);
                 })
               }
@@ -258,7 +261,7 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
             disabled={busy !== null || !customInterval}
             onClick={() =>
               run('interval', async () => {
-                onConfig(await api.updateConfig(password, { interval_minutes: Number(customInterval) }));
+                onConfig(await api.updateConfig({ interval_minutes: Number(customInterval) }));
                 setCustomInterval('');
                 flash('CUSTOM INTERVAL COMMITTED');
               })
@@ -320,7 +323,7 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
                   title="Download decrypted copy"
                   className="p-1 text-steel-dim transition-colors hover:text-amber"
                   disabled={busy !== null}
-                  onClick={() => run('dl', () => api.downloadFile(password, f.id))}
+                  onClick={() => run('dl', () => api.downloadFile(f.id))}
                 >
                   <Download className="h-4 w-4" />
                 </button>
@@ -330,7 +333,7 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
                   disabled={busy !== null}
                   onClick={() =>
                     run('del', async () => {
-                      onConfig(await api.deleteFile(password, f.id));
+                      onConfig(await api.deleteFile(f.id));
                       flash('FILE PURGED FROM VAULT');
                     })
                   }
@@ -418,12 +421,11 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
             disabled={busy !== null}
             onClick={() =>
               run('delivery', async () => {
-                // sweep any address still sitting in the CC input into the list
                 const pending = ccInput.trim();
                 const finalCc =
                   pending && !ccList.includes(pending) ? [...ccList, pending] : ccList;
                 onConfig(
-                  await api.updateConfig(password, {
+                  await api.updateConfig({
                     recipient_email: recipient.trim(),
                     cc_emails: finalCc,
                     operator_email: operatorEmail.trim(),
@@ -444,7 +446,7 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
             disabled={busy !== null}
             onClick={() =>
               run('test', async () => {
-                await api.sendTestEmail(password);
+                await api.sendTestEmail();
                 flash('TEST TRANSMISSION SENT — CHECK RECIPIENT INBOX');
               })
             }
@@ -454,11 +456,49 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
         </div>
       </Panel>
 
+      {/* Identity */}
+      <Panel title="IDENTITY" index={4}>
+        <div className="grid items-end gap-4 sm:grid-cols-2">
+          <div>
+            <FieldLabel>CALLSIGN — SHOWN ON THE PUBLIC WALL</FieldLabel>
+            <input
+              className={inputCls}
+              value={callsign}
+              maxLength={24}
+              onChange={(e) => setCallsign(e.target.value.toUpperCase())}
+            />
+          </div>
+          <button
+            className={`${btnCls} h-[38px] ${
+              showOnWall
+                ? 'border-armed-dim text-armed hover:border-armed'
+                : 'border-edge text-steel-dim hover:border-steel'
+            }`}
+            onClick={() => setShowOnWall(!showOnWall)}
+          >
+            {showOnWall ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
+            {showOnWall ? 'VISIBLE ON WALL' : 'HIDDEN FROM WALL'}
+          </button>
+        </div>
+        <button
+          className={`${btnCls} mt-4 border-amber-dim text-amber hover:bg-amber hover:text-void`}
+          disabled={busy !== null}
+          onClick={() =>
+            run('identity', async () => {
+              onConfig(await api.updateConfig({ callsign: callsign.trim(), show_on_wall: showOnWall }));
+              flash('IDENTITY COMMITTED');
+            })
+          }
+        >
+          COMMIT IDENTITY
+        </button>
+      </Panel>
+
       {/* Security */}
-      <Panel title="SECURITY" index={4}>
+      <Panel title="SECURITY" index={5}>
         <div className="grid gap-4 sm:grid-cols-2">
           <div>
-            <FieldLabel>NEW AUTHORIZATION CODE (MIN 8 CHARS)</FieldLabel>
+            <FieldLabel>NEW PASSPHRASE (MIN 8 CHARS)</FieldLabel>
             <input
               type="password"
               className={inputCls}
@@ -468,7 +508,7 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
             />
           </div>
           <div>
-            <FieldLabel>CONFIRM NEW CODE</FieldLabel>
+            <FieldLabel>CONFIRM NEW PASSPHRASE</FieldLabel>
             <input
               type="password"
               className={inputCls}
@@ -483,18 +523,17 @@ const Console: React.FC<Props> = ({ password, config, onConfig, onLock }) => {
           disabled={busy !== null || newPass.length < 8 || newPass !== newPass2}
           onClick={() =>
             run('pass', async () => {
-              await api.changePassword(password, newPass);
+              await api.changePassword(newPass);
               setNewPass('');
               setNewPass2('');
-              flash('AUTHORIZATION CODE ROTATED — RE-LOCKING CONSOLE');
-              setTimeout(onLock, 1500);
+              flash('PASSPHRASE ROTATED');
             })
           }
         >
-          <KeyRound className="h-3.5 w-3.5" /> ROTATE CODE
+          <KeyRound className="h-3.5 w-3.5" /> ROTATE PASSPHRASE
         </button>
         {newPass && newPass !== newPass2 && (
-          <p className="mt-2 font-mono text-[0.7rem] text-alarm">CODES DO NOT MATCH</p>
+          <p className="mt-2 font-mono text-[0.7rem] text-alarm">PASSPHRASES DO NOT MATCH</p>
         )}
       </Panel>
     </div>
