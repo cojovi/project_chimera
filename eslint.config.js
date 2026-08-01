@@ -5,7 +5,27 @@ import reactRefresh from 'eslint-plugin-react-refresh';
 import tseslint from 'typescript-eslint';
 
 export default tseslint.config(
-  { ignores: ['dist'] },
+  {
+    // 'supabase' holds Deno edge functions; the rest are legacy paths removed by cleanup.sh
+    ignores: [
+      'dist',
+      'supabase',
+      'backend',
+      'scripts',
+      'src/pages',
+      'src/services',
+      'src/store',
+      'src/hooks',
+      'src/types',
+      'src/components/ui',
+      'src/components/Header.tsx',
+      'src/components/Footer.tsx',
+      'src/components/PasswordEntryForm.tsx',
+      'src/components/StatusInfo.tsx',
+      'vercel-cron-solution.js',
+      'vercel-serverless-timer.js'
+    ]
+  },
   {
     extends: [js.configs.recommended, ...tseslint.configs.recommended],
     files: ['**/*.{ts,tsx}'],
@@ -19,10 +39,7 @@ export default tseslint.config(
     },
     rules: {
       ...reactHooks.configs.recommended.rules,
-      'react-refresh/only-export-components': [
-        'warn',
-        { allowConstantExport: true },
-      ],
+      'react-refresh/only-export-components': ['warn', { allowConstantExport: true }],
     },
   }
 );

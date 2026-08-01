@@ -1,4 +1,0 @@
-This is a test email from Project Chimera.
-Sent at: ${new Date().toISOString()}
-
-If you receive this, the email system is working correctly.
