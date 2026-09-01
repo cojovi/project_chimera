@@ -26,6 +26,41 @@ export interface PayloadFile {
   created_at: string;
 }
 
+export type AccountStatus = 'pending' | 'approved' | 'denied';
+
+export interface PendingAccount {
+  user_id: string;
+  callsign: string;
+  signup_email: string | null;
+  signup_note: string | null;
+  created_at: string;
+}
+
+export interface ReviewedAccount extends PendingAccount {
+  status: AccountStatus;
+  invite_code: string | null;
+  reviewed_at: string | null;
+  denial_reason: string | null;
+}
+
+export interface InviteCode {
+  id: string;
+  code: string;
+  label: string;
+  max_uses: number | null;
+  used_count: number;
+  expires_at: string | null;
+  active: boolean;
+  created_at: string;
+}
+
+export interface AdminOverview {
+  pending: PendingAccount[];
+  recent: ReviewedAccount[];
+  codes: InviteCode[];
+  server_time: string;
+}
+
 export interface UserConfig {
   status: SwitchStatus;
   interval_minutes: number;
@@ -39,6 +74,9 @@ export interface UserConfig {
   triggered_at: string | null;
   callsign: string;
   show_on_wall: boolean;
+  account_status: AccountStatus;
+  is_admin: boolean;
+  denial_reason: string | null;
   files: PayloadFile[];
 }
 
@@ -63,8 +101,21 @@ async function authed<T>(action: string, body: Record<string, unknown> = {}): Pr
 // ---- public ----
 export const getFeed = () => post<WallFeed>(WALL, { action: 'feed' });
 
-export const signup = (email: string, password: string, callsign: string) =>
-  post<{ ok: boolean }>(WALL, { action: 'signup', email, password, callsign });
+export const signup = (
+  email: string,
+  password: string,
+  callsign: string,
+  inviteCode?: string,
+  note?: string
+) =>
+  post<{ ok: boolean; status: AccountStatus }>(WALL, {
+    action: 'signup',
+    email,
+    password,
+    callsign,
+    invite_code: inviteCode ?? '',
+    note: note ?? ''
+  });
 
 export async function login(email: string, password: string): Promise<void> {
   const { error } = await supabase.auth.signInWithPassword({ email, password });
@@ -131,3 +182,25 @@ export async function uploadFile(file: File): Promise<UserConfig> {
     data_b64: dataB64
   });
 }
+
+// ---- admin ----
+export const adminOverview = () => authed<AdminOverview>('admin_overview');
+
+export const adminReview = (userId: string, decision: 'approved' | 'denied', reason?: string) =>
+  authed<{ ok: boolean }>('admin_review', { user_id: userId, decision, reason: reason ?? '' });
+
+export const adminDeleteAccount = (userId: string) =>
+  authed<{ ok: boolean }>('admin_delete_account', { user_id: userId });
+
+export const adminCreateCode = (opts: {
+  code: string;
+  label?: string;
+  max_uses?: number | null;
+  expires_in_days?: number | null;
+}) => authed<{ ok: boolean }>('admin_create_code', { ...opts });
+
+export const adminSetCodeActive = (codeId: string, active: boolean) =>
+  authed<{ ok: boolean }>('admin_set_code_active', { code_id: codeId, active });
+
+export const adminDeleteCode = (codeId: string) =>
+  authed<{ ok: boolean }>('admin_delete_code', { code_id: codeId });

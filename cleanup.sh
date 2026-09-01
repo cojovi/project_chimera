@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-shot cleanup: removes all legacy files from the pre-rebuild Project Chimera.
+# One-shot cleanup: removes all legacy files from the pre-rebuild Operation Kill Switch.
 # Run once from the repo root:  bash cleanup.sh
 set -uo pipefail
 cd "$(dirname "$0")"

@@ -1,4 +1,4 @@
-# PROTOCOL CHIMERA
+# OPERATION KILL SWITCH
 
 A dead man's switch. Upload files, set a check-in interval, arm the switch. Miss
 a check-in and your encrypted payload is decrypted server-side and emailed to
@@ -58,3 +58,19 @@ Push and import into Vercel (framework auto-detected), or `npx vercel --prod`.
 - Payload limits: 10 MB per file, 20 files per user.
 - Mock timers live in the `mock_timers` table — delete those rows once you have
   enough real operators on the wall.
+
+## Access control
+
+Signup is gated. The form takes an optional **sign-up code**:
+
+- valid code → account is cleared immediately, straight into the console
+- no code → account is created `pending`; it can log in but the switch, the
+  payload vault and the public wall stay locked until an admin clears it
+- bad code → rejected outright (never silently downgraded to pending)
+
+Admins manage the queue and issue codes at `#/command`. Codes are per-channel
+(`label`, `max_uses`, `expires_at`), and `profiles.invite_code` records which
+code each operator came in on, so signups are attributable to a marketing
+source.
+
+See `DEPLOY_REBRAND.md` for the rollout steps.

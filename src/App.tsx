@@ -9,6 +9,8 @@ import Countdown, { urgencyOf } from './components/Countdown';
 import TimerWall from './components/TimerWall';
 import AuthPanel from './components/AuthPanel';
 import Console from './components/Console';
+import PendingScreen from './components/PendingScreen';
+import AdminPanel from './components/AdminPanel';
 
 const App: React.FC = () => {
   const [session, setSession] = useState<Session | null>(null);
@@ -17,7 +19,17 @@ const App: React.FC = () => {
   const [config, setConfig] = useState<UserConfig | null>(null);
   const [offline, setOffline] = useState(false);
   const [now, setNow] = useState(Date.now());
+  const [route, setRoute] = useState(() => window.location.hash);
+  const [pendingCount, setPendingCount] = useState(0);
   const offsetRef = useRef(0);
+
+  // Hash routing keeps /command deep-linkable without needing a server rewrite
+  // rule on the static host.
+  useEffect(() => {
+    const onHash = () => setRoute(window.location.hash);
+    window.addEventListener('hashchange', onHash);
+    return () => window.removeEventListener('hashchange', onHash);
+  }, []);
 
   const refreshFeed = useCallback(async () => {
     try {
@@ -63,6 +75,26 @@ const App: React.FC = () => {
     return () => clearInterval(t);
   }, [session, refreshFeed]);
 
+  const isApproved = config?.account_status === 'approved';
+  const isAdmin = !!config?.is_admin;
+  const adminView = isAdmin && route === '#/command';
+
+  // Poll the review queue so the operator gets nagged without a push channel.
+  useEffect(() => {
+    if (!isAdmin) {
+      setPendingCount(0);
+      return;
+    }
+    const check = () =>
+      void api
+        .adminOverview()
+        .then((o) => setPendingCount(o.pending.length))
+        .catch(() => undefined);
+    check();
+    const t = setInterval(check, 60_000);
+    return () => clearInterval(t);
+  }, [isAdmin, route]);
+
   const nowMs = now + offsetRef.current;
 
   const remaining = useMemo(
@@ -96,14 +128,25 @@ const App: React.FC = () => {
         <div className="flex items-center gap-3">
           <span className={`h-2.5 w-2.5 rounded-full ${lampColor}`} />
           <h1 className="font-display text-sm tracking-[0.45em] text-steel sm:text-base">
-            PROTOCOL <span className="text-amber glow-amber">CHIMERA</span>
+            OPERATION KILL <span className="text-amber glow-amber">SWITCH</span>
           </h1>
         </div>
         <div className="hidden font-mono text-[0.65rem] tracking-[0.2em] text-steel-dim sm:block">
           {offline ? (
             <span className="text-alarm">LINK DOWN — RETRYING</span>
           ) : session ? (
-            `OPERATOR ${config?.callsign ?? '…'}`
+            <span className="flex items-center gap-4">
+              <span>OPERATOR {config?.callsign ?? '…'}</span>
+              {isAdmin && (
+                <a
+                  href={adminView ? '#/' : '#/command'}
+                  className="border border-edge px-2 py-0.5 tracking-[0.2em] text-steel-dim transition-colors hover:border-amber-dim hover:text-amber"
+                >
+                  {adminView ? 'CONSOLE' : 'COMMAND'}
+                  {pendingCount > 0 && <span className="ml-2 text-amber">{pendingCount}</span>}
+                </a>
+              )}
+            </span>
           ) : (
             'UPLINK NOMINAL'
           )}
@@ -155,7 +198,31 @@ const App: React.FC = () => {
             </motion.div>
           )}
 
-          {booted && session && config && (
+          {booted && session && config && adminView && (
+            <motion.div
+              key="admin"
+              className="w-full py-2"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0, transition: { duration: 0.25 } }}
+            >
+              <AdminPanel onExit={() => { window.location.hash = '#/'; }} />
+            </motion.div>
+          )}
+
+          {booted && session && config && !adminView && !isApproved && (
+            <motion.div
+              key="pending"
+              className="w-full"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0, transition: { duration: 0.25 } }}
+            >
+              <PendingScreen config={config} onLogout={handleLogout} />
+            </motion.div>
+          )}
+
+          {booted && session && config && !adminView && isApproved && (
             <motion.div
               key="console"
               className="w-full py-6"
@@ -188,7 +255,7 @@ const App: React.FC = () => {
       </main>
 
       <footer className="flex items-center justify-between border-t border-edge px-6 py-3 font-mono text-[0.6rem] tracking-[0.25em] text-steel-faint sm:px-10">
-        <span>PROJECT CHIMERA v2.0</span>
+        <span>OPERATION KILL SWITCH v2.0</span>
         <span className="hidden sm:inline">SERVER-SIDE FAILSAFE · AES-256 VAULT · RESEND RELAY</span>
         <span>{new Date(now).toUTCString().slice(17, 25)} UTC</span>
       </footer>

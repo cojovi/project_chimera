@@ -1,0 +1,2 @@
+You know that thing in movies — if I don't check in, send everything?
+Protocol Chimera is that, for real. Build your own dead man's switch.

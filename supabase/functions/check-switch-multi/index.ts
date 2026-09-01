@@ -95,7 +95,7 @@ Deno.serve(async (req) => {
             cc: s.cc_emails ?? [],
             subject: s.email_subject,
             text:
-              `${s.email_message}\n\n— Released automatically by Project Chimera at ${new Date().toISOString()} (${attachments.length} attachment(s)).`,
+              `${s.email_message}\n\n— Released automatically by Operation Kill Switch at ${new Date().toISOString()} (${attachments.length} attachment(s)).`,
             attachments,
           });
           await supabase
@@ -113,7 +113,7 @@ Deno.serve(async (req) => {
           if (remainingMs > 0 && remainingMs <= totalMs * 0.1) {
             await sendResend({
               to: [s.operator_email],
-              subject: `PROTOCOL CHIMERA :: CHECK-IN REQUIRED — T-MINUS ${formatRemaining(remainingMs)}`,
+              subject: `OPERATION KILL SWITCH :: CHECK-IN REQUIRED — T-MINUS ${formatRemaining(remainingMs)}`,
               text:
                 `Operator — your dead man's switch is in its final 10% window.\n\n` +
                 `Time remaining: ${formatRemaining(remainingMs)}\n` +

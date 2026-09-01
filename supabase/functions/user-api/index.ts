@@ -75,9 +75,22 @@ async function listFiles(userId: string) {
   return data ?? [];
 }
 
+async function getProfile(userId: string) {
+  const { data } = await supabase
+    .from("profiles")
+    .select("callsign, show_on_wall, status, is_admin, signup_email, denial_reason")
+    .eq("user_id", userId)
+    .single();
+  return data;
+}
+
+// Actions a pending / denied operator may still call. Everything else is
+// refused until an admin clears the account.
+const UNGATED_ACTIONS = new Set(["config", "update_config", "logout"]);
+
 async function fullConfig(userId: string) {
   const s = await getSwitch(userId);
-  const { data: prof } = await supabase.from("profiles").select("callsign, show_on_wall").eq("user_id", userId).single();
+  const prof = await getProfile(userId);
   return {
     status: s.status,
     interval_minutes: s.interval_minutes,
@@ -91,8 +104,15 @@ async function fullConfig(userId: string) {
     triggered_at: s.triggered_at,
     callsign: prof?.callsign ?? "",
     show_on_wall: prof?.show_on_wall ?? true,
+    account_status: prof?.status ?? "pending",
+    is_admin: prof?.is_admin ?? false,
+    denial_reason: prof?.denial_reason ?? null,
     files: await listFiles(userId),
   };
+}
+
+function adminJson(body: unknown, status = 200): Response {
+  return json(body, status);
 }
 
 Deno.serve(async (req) => {
@@ -109,6 +129,27 @@ Deno.serve(async (req) => {
 
     const body = await req.json().catch(() => ({}));
     const action = body?.action as string;
+
+    const profile = await getProfile(uid);
+    const accountStatus = profile?.status ?? "pending";
+    const isAdmin = !!profile?.is_admin;
+    const isAdminAction = typeof action === "string" && action.startsWith("admin_");
+
+    if (isAdminAction && !isAdmin) {
+      return json({ error: "NOT AUTHORIZED" }, 403);
+    }
+    if (!isAdminAction && accountStatus !== "approved" && !UNGATED_ACTIONS.has(action)) {
+      return json(
+        {
+          error:
+            accountStatus === "denied"
+              ? "THIS ACCOUNT WAS NOT CLEARED FOR SERVICE"
+              : "ACCOUNT AWAITING CLEARANCE — THE SWITCH IS LOCKED UNTIL AN OPERATOR APPROVES IT",
+          account_status: accountStatus,
+        },
+        403,
+      );
+    }
 
     switch (action) {
       case "config":
@@ -200,7 +241,9 @@ Deno.serve(async (req) => {
             if (taken && taken.length) return json({ error: "callsign already in service" }, 409);
             pPatch.callsign = cs;
           }
-          if (body.show_on_wall !== undefined) pPatch.show_on_wall = !!body.show_on_wall;
+          if (body.show_on_wall !== undefined) {
+            pPatch.show_on_wall = accountStatus === "approved" ? !!body.show_on_wall : false;
+          }
           const { error: pErr } = await supabase.from("profiles").update(pPatch).eq("user_id", uid);
           if (pErr) throw new Error(pErr.message);
         }
@@ -284,14 +327,142 @@ Deno.serve(async (req) => {
             from,
             to: [s.recipient_email],
             cc: s.cc_emails ?? [],
-            subject: "PROTOCOL CHIMERA :: DELIVERY TEST",
+            subject: "OPERATION KILL SWITCH :: DELIVERY TEST",
             text:
-              "This is a delivery test from Project Chimera. The switch has NOT fired. If you can read this, the release channel is working.",
+              "This is a delivery test from Operation Kill Switch. The switch has NOT fired. If you can read this, the release channel is working.",
           }),
         });
         const text = await resp.text();
         if (!resp.ok) return json({ error: `resend ${resp.status}: ${text}` }, 502);
         return json({ ok: true });
+      }
+
+      // ------------------------------------------------------- admin panel
+      case "admin_overview": {
+        const { data: pending } = await supabase
+          .from("profiles")
+          .select("user_id, callsign, signup_email, signup_note, created_at")
+          .eq("status", "pending")
+          .order("created_at", { ascending: true });
+
+        const { data: recent } = await supabase
+          .from("profiles")
+          .select("user_id, callsign, signup_email, status, invite_code, reviewed_at, denial_reason, created_at")
+          .neq("status", "pending")
+          .order("created_at", { ascending: false })
+          .limit(50);
+
+        const { data: codes } = await supabase
+          .from("invite_codes")
+          .select("id, code, label, max_uses, used_count, expires_at, active, created_at")
+          .order("created_at", { ascending: false });
+
+        return adminJson({
+          pending: pending ?? [],
+          recent: recent ?? [],
+          codes: codes ?? [],
+          server_time: new Date().toISOString(),
+        });
+      }
+
+      case "admin_review": {
+        const targetId = String(body.user_id ?? "");
+        const decision = String(body.decision ?? "");
+        if (!targetId) return json({ error: "user_id required" }, 400);
+        if (decision !== "approved" && decision !== "denied") {
+          return json({ error: "decision must be approved or denied" }, 400);
+        }
+        if (targetId === uid) return json({ error: "cannot review your own account" }, 400);
+
+        const patch: Record<string, unknown> = {
+          status: decision,
+          reviewed_at: new Date().toISOString(),
+          reviewed_by: uid,
+          denial_reason: decision === "denied" ? String(body.reason ?? "").slice(0, 300) || null : null,
+        };
+        // A denied operator comes off the wall and their switch is stood down.
+        if (decision === "denied") patch.show_on_wall = false;
+
+        const { error } = await supabase.from("profiles").update(patch).eq("user_id", targetId);
+        if (error) throw new Error(error.message);
+
+        if (decision === "denied") {
+          await supabase
+            .from("switches")
+            .update({ status: "disarmed", updated_at: new Date().toISOString() })
+            .eq("user_id", targetId);
+        }
+        return adminJson({ ok: true });
+      }
+
+      case "admin_delete_account": {
+        const targetId = String(body.user_id ?? "");
+        if (!targetId) return json({ error: "user_id required" }, 400);
+        if (targetId === uid) return json({ error: "cannot delete your own account" }, 400);
+
+        // Purge encrypted payloads before the cascade drops the registry rows.
+        const { data: files } = await supabase
+          .from("user_payload_files")
+          .select("storage_path")
+          .eq("user_id", targetId);
+        const paths = (files ?? []).map((f) => f.storage_path);
+        if (paths.length) await supabase.storage.from("payload").remove(paths);
+
+        const { error } = await supabase.auth.admin.deleteUser(targetId);
+        if (error) return json({ error: error.message }, 400);
+        return adminJson({ ok: true });
+      }
+
+      case "admin_create_code": {
+        const code = String(body.code ?? "").trim().toUpperCase();
+        if (!/^[A-Z0-9_-]{4,64}$/.test(code)) {
+          return json({ error: "code: 4-64 chars, letters/numbers/dash/underscore" }, 400);
+        }
+        const label = String(body.label ?? "").trim().slice(0, 120);
+        let maxUses: number | null = null;
+        if (body.max_uses !== undefined && body.max_uses !== null && body.max_uses !== "") {
+          const n = Number(body.max_uses);
+          if (!Number.isFinite(n) || n < 1 || n > 100000) return json({ error: "max_uses must be 1-100000" }, 400);
+          maxUses = Math.round(n);
+        }
+        let expiresAt: string | null = null;
+        if (body.expires_in_days !== undefined && body.expires_in_days !== null && body.expires_in_days !== "") {
+          const d = Number(body.expires_in_days);
+          if (!Number.isFinite(d) || d < 1 || d > 3650) return json({ error: "expires_in_days must be 1-3650" }, 400);
+          expiresAt = new Date(Date.now() + d * 86_400_000).toISOString();
+        }
+
+        const { error } = await supabase.from("invite_codes").insert({
+          code,
+          label,
+          max_uses: maxUses,
+          expires_at: expiresAt,
+          created_by: uid,
+        });
+        if (error) {
+          if (error.code === "23505") return json({ error: "that code already exists" }, 409);
+          throw new Error(error.message);
+        }
+        return adminJson({ ok: true });
+      }
+
+      case "admin_set_code_active": {
+        const id = String(body.code_id ?? "");
+        if (!id) return json({ error: "code_id required" }, 400);
+        const { error } = await supabase
+          .from("invite_codes")
+          .update({ active: !!body.active })
+          .eq("id", id);
+        if (error) throw new Error(error.message);
+        return adminJson({ ok: true });
+      }
+
+      case "admin_delete_code": {
+        const id = String(body.code_id ?? "");
+        if (!id) return json({ error: "code_id required" }, 400);
+        const { error } = await supabase.from("invite_codes").delete().eq("id", id);
+        if (error) throw new Error(error.message);
+        return adminJson({ ok: true });
       }
 
       default:

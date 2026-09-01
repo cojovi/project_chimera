@@ -1,5 +1,7 @@
 // MULTI-USER BRANCH. Deployed as edge function `wall` (verify_jwt: false).
-// Public endpoint: landing wall feed + account signup (auto-confirmed).
+// Public endpoint: landing wall feed + account signup.
+// Signup with a valid invite code is auto-approved; without one the account
+// is created in `pending` and cannot arm until an admin clears it.
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const supabase = createClient(
@@ -48,12 +50,15 @@ Deno.serve(async (req) => {
         .from("switches")
         .select("status, interval_minutes, next_trigger_at, user_id")
         .in("status", ["armed", "triggered"]);
-      const { data: profs } = await supabase.from("profiles").select("user_id, callsign, show_on_wall");
+      const { data: profs } = await supabase.from("profiles").select("user_id, callsign, show_on_wall, status");
       const profMap = new Map((profs ?? []).map((p) => [p.user_id, p]));
 
       const timers = [
         ...(real ?? [])
-          .filter((s) => profMap.get(s.user_id)?.show_on_wall)
+          .filter((s) => {
+            const p = profMap.get(s.user_id);
+            return !!p && p.status === "approved" && p.show_on_wall;
+          })
           .map((s) => ({
             callsign: profMap.get(s.user_id)!.callsign.toUpperCase(),
             status: s.status,
@@ -77,6 +82,9 @@ Deno.serve(async (req) => {
       const email = String(body.email ?? "").trim().toLowerCase();
       const password = String(body.password ?? "");
       const callsign = String(body.callsign ?? "").trim();
+      const inviteCode = String(body.invite_code ?? "").trim();
+      const note = String(body.note ?? "").trim().slice(0, 500);
+
       if (!EMAIL_RE.test(email)) return json({ error: "invalid email" }, 400);
       if (password.length < 8) return json({ error: "passphrase must be at least 8 characters" }, 400);
       if (!CALLSIGN_RE.test(callsign)) {
@@ -85,6 +93,31 @@ Deno.serve(async (req) => {
 
       const { data: taken } = await supabase.from("profiles").select("user_id").ilike("callsign", callsign).limit(1);
       if (taken && taken.length) return json({ error: "callsign already in service" }, 409);
+
+      // A valid invite code redeems atomically and grants immediate clearance.
+      // An invalid/expired/exhausted code is rejected outright rather than
+      // silently downgrading to pending — otherwise a typo looks like a bug.
+      let status: "approved" | "pending" = "pending";
+      let redeemedCode: string | null = null;
+      if (inviteCode) {
+        const { data: ok, error: rErr } = await supabase.rpc("redeem_invite_code", { p_code: inviteCode });
+        if (rErr) return json({ error: "could not verify sign-up code" }, 500);
+        if (!ok) return json({ error: "sign-up code not recognized, expired, or fully used" }, 403);
+        status = "approved";
+        redeemedCode = inviteCode.toUpperCase();
+      }
+
+      // Crude flood ceiling: a bot can't fill auth.users with pending accounts
+      // faster than the operator can clear the queue.
+      if (status === "pending") {
+        const { count } = await supabase
+          .from("profiles")
+          .select("user_id", { count: "exact", head: true })
+          .eq("status", "pending");
+        if ((count ?? 0) >= 250) {
+          return json({ error: "the review queue is full — try again later or use a sign-up code" }, 429);
+        }
+      }
 
       const { data: created, error: cErr } = await supabase.auth.admin.createUser({
         email,
@@ -96,7 +129,17 @@ Deno.serve(async (req) => {
       }
 
       const uid = created.user.id;
-      const { error: pErr } = await supabase.from("profiles").insert({ user_id: uid, callsign });
+      const { error: pErr } = await supabase.from("profiles").insert({
+        user_id: uid,
+        callsign,
+        status,
+        signup_email: email,
+        signup_note: note || null,
+        invite_code: redeemedCode,
+        reviewed_at: status === "approved" ? new Date().toISOString() : null,
+        // pending accounts stay off the public wall until cleared
+        show_on_wall: status === "approved",
+      });
       if (pErr) {
         await supabase.auth.admin.deleteUser(uid);
         return json({ error: `profile: ${pErr.message}` }, 400);
@@ -107,7 +150,7 @@ Deno.serve(async (req) => {
         operator_email: email,
       });
 
-      return json({ ok: true });
+      return json({ ok: true, status });
     }
 
     return json({ error: `unknown action: ${action}` }, 400);
