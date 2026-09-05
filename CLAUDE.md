@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This repo has three intentionally divergent versions of the app. **Do not
 "unify" them.**
 
-- **`main`** — v1, single operator. One hardcoded-in-DB password (`bluemoon25`
-  unless rotated) gates everything. No accounts, no login. Cody wants this
+- **`main`** — v1, single operator. One hardcoded-in-DB bcrypt password hash gates
+  everything. The password itself is NOT recorded here — this repo is public.
+  Rotate it with `select public.set_password('<new>')` as the service role. No accounts, no login. Cody wants this
   branch preserved exactly as-is.
 - **`killswitch`** (this branch) — v2.1, the live product at
   **www.operationkillswitch.com**. Everything `multiple` has, plus the
@@ -65,6 +66,23 @@ Invite codes live in `public.invite_codes` (code / label / max_uses /
 used_count / expires_at / active). Issue one per marketing channel so
 conversion is attributable — `profiles.invite_code` records which code a user
 came in on.
+
+## Security
+
+Audited 2026-09-05 — see `SECURITY.md` for the findings table and the
+outstanding manual steps. Re-run `./scripts/security-probe.sh` after any deploy;
+it is safe against production (reads only, plus writes that must be refused).
+
+Two rules that are easy to break by accident:
+
+- **Revoke functions from `PUBLIC`, not just `anon, authenticated`.** Roles
+  inherit the `PUBLIC` grant, so `revoke ... from anon, authenticated` leaves a
+  `SECURITY DEFINER` function wide open. That exact mistake in
+  `20260901_okswitch_signup_gate.sql` made `redeem_invite_code()` callable by
+  anyone holding the shipped anon key.
+- **`test_email` sends mail from a DKIM-signed domain to a user-chosen
+  recipient.** It is rate limited to 3/hour and 10/day per operator. Do not
+  loosen that without putting something else in front of it.
 
 ## What this is
 

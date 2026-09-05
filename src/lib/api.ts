@@ -106,7 +106,8 @@ export const signup = (
   password: string,
   callsign: string,
   inviteCode?: string,
-  note?: string
+  note?: string,
+  turnstileToken?: string
 ) =>
   post<{ ok: boolean; status: AccountStatus }>(WALL, {
     action: 'signup',
@@ -114,7 +115,8 @@ export const signup = (
     password,
     callsign,
     invite_code: inviteCode ?? '',
-    note: note ?? ''
+    note: note ?? '',
+    turnstile_token: turnstileToken ?? ''
   });
 
 export async function login(email: string, password: string): Promise<void> {

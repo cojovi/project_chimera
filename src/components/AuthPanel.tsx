@@ -1,6 +1,67 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { motion } from 'framer-motion';
 import * as api from '../lib/api';
+
+// Cloudflare Turnstile. Renders only when a site key is configured, so the
+// panel keeps working unchanged until the key is set in the environment.
+const TURNSTILE_SITE_KEY = (import.meta.env.VITE_TURNSTILE_SITE_KEY as string | undefined) ?? '';
+
+declare global {
+  interface Window {
+    turnstile?: {
+      render: (el: HTMLElement, opts: Record<string, unknown>) => string;
+      reset: (id?: string) => void;
+    };
+  }
+}
+
+function useTurnstile(active: boolean, onToken: (t: string) => void) {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  const widgetRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!TURNSTILE_SITE_KEY || !active) return;
+    let cancelled = false;
+
+    const mount = () => {
+      if (cancelled || !boxRef.current || widgetRef.current || !window.turnstile) return;
+      widgetRef.current = window.turnstile.render(boxRef.current, {
+        sitekey: TURNSTILE_SITE_KEY,
+        theme: 'dark',
+        callback: (token: string) => onToken(token),
+        'error-callback': () => onToken(''),
+        'expired-callback': () => onToken('')
+      });
+    };
+
+    if (window.turnstile) {
+      mount();
+    } else {
+      const existing = document.querySelector<HTMLScriptElement>('script[data-turnstile]');
+      const script = existing ?? document.createElement('script');
+      if (!existing) {
+        script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+        script.async = true;
+        script.defer = true;
+        script.dataset.turnstile = 'true';
+        document.head.appendChild(script);
+      }
+      script.addEventListener('load', mount);
+    }
+
+    return () => {
+      cancelled = true;
+      widgetRef.current = null;
+    };
+  }, [active, onToken]);
+
+  const reset = () => {
+    if (widgetRef.current && window.turnstile) window.turnstile.reset(widgetRef.current);
+    onToken('');
+  };
+
+  return { boxRef, reset, enabled: !!TURNSTILE_SITE_KEY };
+}
 
 interface Props {
   onAuthed: () => void;
@@ -19,6 +80,10 @@ const AuthPanel: React.FC<Props> = ({ onAuthed }) => {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);
+  const [captcha, setCaptcha] = useState('');
+
+  const handleToken = React.useCallback((t: string) => setCaptcha(t), []);
+  const turnstile = useTurnstile(mode === 'signup', handleToken);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -27,12 +92,19 @@ const AuthPanel: React.FC<Props> = ({ onAuthed }) => {
     setError(null);
     try {
       if (mode === 'signup') {
+        if (password.length < 12) {
+          throw new Error('PASSPHRASE MUST BE AT LEAST 12 CHARACTERS');
+        }
+        if (turnstile.enabled && !captcha) {
+          throw new Error('COMPLETE THE HUMAN VERIFICATION CHECK FIRST');
+        }
         const res = await api.signup(
           email.trim(),
           password,
           callsign.trim(),
           inviteCode.trim(),
-          note.trim()
+          note.trim(),
+          captcha
         );
         if (res.status === 'pending') {
           // No code supplied — the account exists but is locked. Show the
@@ -45,6 +117,8 @@ const AuthPanel: React.FC<Props> = ({ onAuthed }) => {
       onAuthed();
     } catch (err) {
       setError(String(err instanceof Error ? err.message : err).toUpperCase());
+      // A Turnstile token is single-use — a failed submit needs a fresh one.
+      if (turnstile.enabled) turnstile.reset();
     } finally {
       setBusy(false);
     }
@@ -166,7 +240,7 @@ const AuthPanel: React.FC<Props> = ({ onAuthed }) => {
       )}
 
       <label className="mb-1.5 mt-4 block font-display text-[0.55rem] tracking-[0.3em] text-steel-dim">
-        PASSPHRASE {mode === 'signup' && '(MIN 8 CHARS)'}
+        PASSPHRASE {mode === 'signup' && '(MIN 12 CHARS)'}
       </label>
       <input
         className={inputCls}
@@ -174,8 +248,13 @@ const AuthPanel: React.FC<Props> = ({ onAuthed }) => {
         value={password}
         onChange={(e) => setPassword(e.target.value)}
         autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+        minLength={mode === 'signup' ? 12 : undefined}
         required
       />
+
+      {mode === 'signup' && turnstile.enabled && (
+        <div ref={turnstile.boxRef} className="mt-4 flex justify-center" />
+      )}
 
       {error && (
         <p className="mt-3 font-mono text-[0.7rem] tracking-[0.15em] text-alarm">{error}</p>

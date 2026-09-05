@@ -3,6 +3,12 @@
 // Cron job `chimera-check-multi` calls this every minute. For every armed
 // switch: sends the 10%-remaining reminder once per cycle, and fires the
 // payload when the deadline passes. One user's failure can't block the others.
+//
+// HARDENED 2026-09-05:
+//   - Cron secret compared in constant time (was `!==`, byte-by-byte early exit).
+//   - Total attachment bytes capped so one operator's 200 MB of payload cannot
+//     OOM the isolate and stall every other switch on the same run.
+//   - Internal exceptions logged, not echoed in the response body.
 import { createClient } from "jsr:@supabase/supabase-js@2";
 
 const supabase = createClient(
@@ -58,10 +64,24 @@ async function sendResend(payload: Record<string, unknown>): Promise<void> {
   if (!resp.ok) throw new Error(`resend ${resp.status}: ${body}`);
 }
 
+/** Timing-safe comparison — no early exit on the first differing byte. */
+function timingSafeEqual(a: string, b: string): boolean {
+  const ab = new TextEncoder().encode(a);
+  const bb = new TextEncoder().encode(b);
+  let diff = ab.length ^ bb.length;
+  const n = Math.max(ab.length, bb.length);
+  for (let i = 0; i < n; i++) diff |= (ab[i] ?? 0) ^ (bb[i] ?? 0);
+  return diff === 0;
+}
+
+// Resend caps a message around 40 MB; stay well under it and under the
+// isolate's memory budget so one fat payload cannot stall the whole run.
+const MAX_TOTAL_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
 Deno.serve(async (req) => {
   try {
     const cronSecret = await secret("CRON_SECRET");
-    if ((req.headers.get("x-cron-secret") ?? "") !== cronSecret) {
+    if (!timingSafeEqual(req.headers.get("x-cron-secret") ?? "", cronSecret)) {
       return new Response("unauthorized", { status: 401 });
     }
 
@@ -84,10 +104,17 @@ Deno.serve(async (req) => {
             .eq("user_id", s.user_id)
             .order("created_at");
           const attachments: { filename: string; content: string }[] = [];
+          let totalBytes = 0;
+          const skipped: string[] = [];
           for (const f of files ?? []) {
+            if (totalBytes + Number(f.size_bytes ?? 0) > MAX_TOTAL_ATTACHMENT_BYTES) {
+              skipped.push(f.file_name);
+              continue;
+            }
             const { data: blob, error: dlErr } = await supabase.storage.from("payload").download(f.storage_path);
             if (dlErr || !blob) throw new Error(`download failed for ${f.file_name}`);
             const plain = await decrypt(await blob.arrayBuffer(), f.iv, keyB64);
+            totalBytes += plain.length;
             attachments.push({ filename: f.file_name, content: bytesToB64(plain) });
           }
           await sendResend({
@@ -95,7 +122,10 @@ Deno.serve(async (req) => {
             cc: s.cc_emails ?? [],
             subject: s.email_subject,
             text:
-              `${s.email_message}\n\n— Released automatically by Operation Kill Switch at ${new Date().toISOString()} (${attachments.length} attachment(s)).`,
+              `${s.email_message}\n\n— Released automatically by Operation Kill Switch at ${new Date().toISOString()} (${attachments.length} attachment(s)).` +
+              (skipped.length
+                ? `\n\nNOT ATTACHED (would have exceeded the message size limit): ${skipped.join(", ")}`
+                : ""),
             attachments,
           });
           await supabase
@@ -130,14 +160,17 @@ Deno.serve(async (req) => {
           }
         }
       } catch (e) {
-        errors.push(`${s.user_id}: ${String(e)}`);
+        // Keep the per-switch detail in the logs only; the response body is
+        // returned to whoever holds the cron secret, so keep it terse.
+        errors.push(s.user_id);
         console.error(`switch ${s.user_id} error:`, e);
       }
     }
 
     return Response.json({ checked: armed?.length ?? 0, fired, reminders, errors });
   } catch (e) {
-    console.error("check-switch-multi error:", e);
-    return Response.json({ error: String(e) }, { status: 500 });
+    const ref = crypto.randomUUID().slice(0, 8);
+    console.error(`[check-switch-multi] ref=${ref}`, e);
+    return Response.json({ error: "internal error", ref }, { status: 500 });
   }
 });

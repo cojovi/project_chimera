@@ -31,3 +31,8 @@ backend/.env
 
 # Temp / editor scratch
 public/.icon.svg.*
+
+# Audit artefacts — never commit
+BACKUP-before-history-rewrite.bundle
+okswitch-src.tgz
+_to_delete/
