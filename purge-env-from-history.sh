@@ -31,11 +31,21 @@ git filter-repo --force --invert-paths --path .env
 
 echo
 echo "==> verifying the key is gone"
-if git rev-list --all | while read -r c; do git grep -l 'MAILGUN_API_KEY' "$c" 2>/dev/null; done | grep -q .; then
-  echo "!! MAILGUN_API_KEY still present — do NOT push. Investigate." >&2
+# Grep for an ASSIGNED secret value, not the bare variable name — the name
+# legitimately appears in this script and in the v1 edge functions that read
+# it from the environment, which would make this check cry wolf.
+if git rev-list --all \
+   | while read -r c; do
+       git grep -lE '(MAILGUN_API_KEY|SUPABASE_SERVICE_ROLE_KEY)[[:space:]]*=[[:space:]]*["'"'"']?[A-Za-z0-9._-]{16}' "$c" 2>/dev/null
+     done | grep -q .; then
+  echo "!! an assigned secret is still present — do NOT push. Investigate." >&2
   exit 1
 fi
-echo "   clean: no MAILGUN_API_KEY anywhere in history"
+if git log --all --oneline -- .env | grep -q .; then
+  echo "!! .env is still in history — do NOT push. Investigate." >&2
+  exit 1
+fi
+echo "   clean: no assigned secrets, and .env is gone from every commit"
 
 echo
 echo "==> git-filter-repo drops the remote by design. Re-add and force-push:"
