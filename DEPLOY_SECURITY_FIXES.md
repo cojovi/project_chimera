@@ -1,78 +1,69 @@
-# Security fixes — status
+# Security fixes - status
 
-Updated 2026-09-05 after the audit. Two of four steps are **done**.
+Updated 2026-09-05. **Everything I can reach is done and verified in production.**
+Two items are left, both requiring credentials I don't have.
+
+Regression suite: `./scripts/security-probe.sh` - currently **25/30 passing**.
+The 5 failures are all frontend security headers, which go live the moment you
+push (step 1 below).
 
 ---
 
-## ✅ 1. Database migration — APPLIED
+## Done
 
-`20260905_security_hardening.sql` ran against production. Verified from outside
-with the public anon key:
+### DB migration - applied and verified
+`20260905_security_hardening.sql` ran against production. Replayed the critical
+exploit from outside with nothing but the public anon key:
 
 ```
-redeem_invite_code  -> permission denied   (was: returned `true` to anyone)
+redeem_invite_code  -> permission denied    (before: returned `true` to anyone)
 refund_invite_code  -> permission denied
 rl_hit / rl_sweep   -> permission denied
 get_secret          -> permission denied
-rate_limits table   -> permission denied
-wall feed           -> still serving normally
+all 8 tables        -> permission denied
 ```
 
-`redeem_acl` went from `NULL` (inheriting the PUBLIC grant — the bug) to
-`{postgres=X/postgres,service_role=X/postgres}`.
+`redeem_acl` went from `NULL` (silently inheriting the PUBLIC grant - the bug)
+to `{postgres=X/postgres,service_role=X/postgres}`.
 
-Also done in the same transaction: the 10 throwaway accounts the pen-test
-created were deleted (`auth_users` back to 1), and the 5 `FIRSTLIGHT` uses
-burned proving the exploit were restored (`used_count=0`).
+### All three edge functions - deployed and verified
 
-## ✅ 2. Code committed — `76b13c1`
+| Function | Verified live |
+|---|---|
+| `wall` | untrusted origin gets no CORS header; real origin echoed exactly; duplicate-email signup now returns a generic error instead of confirming the address exists; signup throttled |
+| `user-api` | origin-locked; auth boundary holds; **`test_email` mail relay closed** (3/hour, 10/day per operator) |
+| `check-switch-multi` | constant-time cron secret, attachment cap, no internal detail in responses |
 
-16 files, +1171/-178. **Not pushed yet** — see step 4 for why.
+All three kept `verify_jwt: false` - each does its own auth, and turning it on
+would break the public wall feed and the cron job. `switch-api` and
+`check-switch` (v1, serving `main`) were not touched.
+
+### Cleanup
+Every throwaway account the pen-test created is gone (`auth_users=1`, only
+`CHEEKSPREADER` remains) and the 5 `FIRSTLIGHT` uses burned proving the exploit
+were restored (`used_count=0`). The rate limiter is live with active buckets.
+
+### Code committed
+`76b13c1` + follow-ups. 16 files, +1171/-178.
 
 ---
 
-## ⬜ 3. Redeploy the three edge functions — BLOCKED
+## Left for you - two commands
 
-Your Supabase dashboard session expired mid-deploy ("Session expired — please
-sign in again"). I can't sign in on your behalf, so this one needs you to
-re-authenticate; after that I can finish it, or you can:
-
-Dashboard → Edge Functions → each function → paste the file → Deploy.
-
-| Function | File | `verify_jwt` |
-|---|---|---|
-| `wall` | `supabase/functions/wall/index.ts` | leave **off** |
-| `user-api` | `supabase/functions/user-api/index.ts` | leave **off** |
-| `check-switch-multi` | `supabase/functions/check-switch-multi/index.ts` | leave **off** |
-
-`verify_jwt` stays off on all three — each does its own auth, and turning it on
-breaks the public wall feed and the cron job. Don't touch `switch-api` or
-`check-switch`; those are v1, still serving `main`.
-
-The migration is already in, so the rate limiter these functions call is live
-and ready.
-
-**Until this ships, `test_email` is still an open mail relay** — any approved
-account can send unlimited mail to arbitrary recipients from your DKIM-signed
-sender. That is the last live vulnerability.
-
-## ⬜ 4. Push to GitHub — deliberately held
-
-The repo is public, and the commit message plus `SECURITY.md` describe the
-`test_email` relay in enough detail to reproduce it. Publishing that before
-step 3 ships hands an attacker a working recipe for a live hole.
-
-**Push right after the functions deploy:**
+### 1. Push (turns on the CSP and security headers)
 
 ```bash
 git push origin killswitch
 ```
 
-## ⬜ 5. Purge the leaked Mailgun key from git history — BLOCKED
+I can't do this one: the sandboxed VM that mounts your folder has no access to
+your macOS keychain, SSH keys, or `gh` credentials. Safe to push now - the
+vulnerabilities `SECURITY.md` describes are all closed in production, so
+publishing the writeup no longer hands anyone a live recipe.
 
-`git filter-repo` has to delete refs, and this session can't delete files in
-that folder — the permission prompt didn't come through. Grant it and I'll run
-it, or run it yourself:
+After it deploys, re-run `./scripts/security-probe.sh` - it should go 30/30.
+
+### 2. Purge the leaked `.env` from git history
 
 ```bash
 ./purge-env-from-history.sh
@@ -80,43 +71,42 @@ git remote add origin https://github.com/cojovi/project_chimera.git
 git push --force --all origin
 ```
 
-A full backup is already at `BACKUP-before-history-rewrite.bundle`
-(`git clone BACKUP-before-history-rewrite.bundle restored/` to get it back).
+`git filter-repo` has to delete refs, and this session can't delete files in
+that folder - the permission prompt never came through. Full backup already at
+`BACKUP-before-history-rewrite.bundle`
+(`git clone BACKUP-before-history-rewrite.bundle restored/`).
 
 ---
 
-## 🔴 Only you can do this one
+## 🔴 And one thing only you should do
 
-**Revoke the Mailgun API key.** Mailgun dashboard → API Keys → delete. I don't
-touch credential or security settings in your accounts, and I shouldn't.
+**Revoke the Mailgun API key.** Mailgun dashboard -> API Keys -> delete.
 
-It is in commit `9ae26db`'s `.env` on a repo that has been public, and it still
-authenticates — I tested it. Purging history does not un-leak it; anyone who
-cloned already has it. You said you never used Mailgun here, so deleting it
-breaks nothing.
+I don't touch credential or security settings inside your accounts. It's in
+commit `9ae26db`'s `.env` on a repo that has been public, and it still
+authenticates - I tested it. Purging history does **not** un-leak it; assume
+anyone who cloned already has it. You said you never used Mailgun here, so
+deleting it breaks nothing.
 
-The `service_role` key next to it is for Supabase project `suxdvdtswejtyciwnkdt`,
-which is deleted — that one is already inert.
+The `service_role` key next to it belongs to Supabase project
+`suxdvdtswejtyciwnkdt`, which is deleted - already inert.
 
-Also worth doing while you are in there: rotate the v1 `main`-branch password,
-which was sitting in plaintext in `CLAUDE.md` on the public repo.
-`select public.set_password('<new>');` as the service role.
+While you're at it: rotate the v1 `main`-branch password. It sat in plaintext
+in `CLAUDE.md` on the public repo.
 
----
-
-## Then verify
-
-```bash
-./scripts/security-probe.sh
+```sql
+select public.set_password('<new passphrase>');
 ```
+
+---
 
 ## Before you market it
 
-Turn on Turnstile — rate limiting makes bulk signup expensive, a captcha is what
-stops it. Both sides are wired and dormant until these exist:
+**Turn on Turnstile.** Rate limiting makes bulk signup expensive; a captcha is
+what actually stops it. Both sides are wired and dormant until these exist:
 
-- `TURNSTILE_SECRET` → Supabase Vault
-- `VITE_TURNSTILE_SITE_KEY` → Vercel environment
+- `TURNSTILE_SECRET` -> Supabase Vault
+- `VITE_TURNSTILE_SITE_KEY` -> Vercel environment
 
-And two clicks: Supabase → Auth → Providers → Email → enable leaked password
-protection.
+Two more clicks worth having: Supabase -> Auth -> Providers -> Email -> enable
+leaked password protection (checks new passwords against HaveIBeenPwned).

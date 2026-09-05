@@ -1,6 +1,10 @@
 # Security — Operation Kill Switch
 
 Audited 2026-09-05 (branch `killswitch`, live project `znnpklgdfgnnwrnvufgr`).
+
+**Status: all findings below are fixed and deployed to production**, except the
+two marked "on you" at the bottom (revoke the leaked Mailgun key, rotate the v1
+password) — neither is something an assistant should do inside your accounts.
 Re-run the black-box regression suite after every deploy:
 
 ```bash
@@ -25,14 +29,14 @@ Re-run the black-box regression suite after every deploy:
 | # | Severity | Finding | Status |
 |---|----------|---------|--------|
 | 1 | **Critical** | Public GitHub repo carried a **live Mailgun API key** in `.env` at commit `9ae26db`. Also a `service_role` key for Supabase project `suxdvdtswejtyciwnkdt` (that project is deleted, so the key is inert). | Key must be **revoked in Mailgun**; `purge-env-from-history.sh` rewrites it out of history |
-| 2 | **Critical** | `redeem_invite_code()` was `EXECUTE`-able by `PUBLIC`. The v2.1 migration revoked it from `anon, authenticated` but not from `PUBLIC`, and roles inherit the `PUBLIC` grant. Anyone with the shipped anon key could confirm valid invite codes and **drain every use** of them over the REST RPC endpoint, unauthenticated and unthrottled. Verified exploitable: 5 uses of `FIRSTLIGHT` were consumed during testing (since restored). | Fixed — `20260905_security_hardening.sql` |
-| 3 | **Critical** | `test_email` was an **open mail relay**. Any approved account could set an arbitrary recipient plus 10 CC addresses and fire unlimited mail from the DKIM-signed `cojovi.com` sender. Measured 15/15 accepted in 10 s. One abusive signup ends the Resend account and blacklists the domain. | Fixed — 3/hour, 10/day per operator |
+| 2 | **Critical** | `redeem_invite_code()` was `EXECUTE`-able by `PUBLIC`. The v2.1 migration revoked it from `anon, authenticated` but not from `PUBLIC`, and roles inherit the `PUBLIC` grant. Anyone with the shipped anon key could confirm valid invite codes and **drain every use** of them over the REST RPC endpoint, unauthenticated and unthrottled. Verified exploitable: 5 uses of `FIRSTLIGHT` were consumed during testing (since restored). | **Fixed & deployed** — verified: `permission denied` to anon |
+| 3 | **Critical** | `test_email` was an **open mail relay**. Any approved account could set an arbitrary recipient plus 10 CC addresses and fire unlimited mail from the DKIM-signed `cojovi.com` sender. Measured 15/15 accepted in 10 s. One abusive signup ends the Resend account and blacklists the domain. | **Fixed & deployed** — 3/hour, 10/day per operator |
 | 4 | High | The v1 operator password was written in plaintext in `CLAUDE.md`, in a public repo. | Scrubbed; **rotate the password** |
-| 5 | High | No rate limiting anywhere. 8/8 accounts created in 6 s from one IP; the 250-pending ceiling is reachable in ~3 minutes, which both DoSes real signups and floods `auth.users`. | Fixed — Postgres token bucket (`rl_hit`), per-IP + per-user + global |
-| 6 | High | Signup echoed the auth error verbatim, turning it into an **account-existence oracle** ("A user with this email address has already been registered"). | Fixed — generic response |
+| 5 | High | No rate limiting anywhere. 8/8 accounts created in 6 s from one IP; the 250-pending ceiling is reachable in ~3 minutes, which both DoSes real signups and floods `auth.users`. | **Fixed & deployed** — Postgres token bucket (`rl_hit`), per-IP + per-user + global |
+| 6 | High | Signup echoed the auth error verbatim, turning it into an **account-existence oracle** ("A user with this email address has already been registered"). | **Fixed & deployed** — verified generic |
 | 7 | High | Both edge functions returned `String(e)` on any exception, leaking Postgres error text, table names and upstream API bodies. | Fixed — logged with a reference id, generic response |
 | 8 | High | No CSP and no security headers in production. Clickjacking and script-injection had no backstop. | Fixed — `vercel.json` |
-| 9 | Medium | `Access-Control-Allow-Origin: *` on both functions. | Fixed — origin allowlist |
+| 9 | Medium | `Access-Control-Allow-Origin: *` on both functions. | **Fixed & deployed** — verified: untrusted origin gets no ACAO header |
 | 10 | Medium | `cc_emails` was `.map()`-ed without a type check; a string or `null` produced a 500 with a raw `TypeError`. | Fixed — `Array.isArray` |
 | 11 | Medium | Upload accepted any `file_name`: traversal sequences (`..\..\win.ini`), path separators, control characters and 600-char names, all of which end up as mail attachment filenames. | Fixed — `safeFileName()` |
 | 12 | Medium | `data_b64` was decoded into memory *before* the size check, and `atob` threw on bad input. | Fixed — encoded-length check first, charset validated |

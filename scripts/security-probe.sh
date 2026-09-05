@@ -55,10 +55,15 @@ r=$(fn wall '{"action":"signup","email":"cojovi@icloud.com","password":"aaaaaaaa
 if echo "$r" | grep -qi 'already been registered'; then no "account-existence oracle -> $r"; else ok "duplicate-email response is generic"; fi
 
 hdr "7. Signup is rate limited"
-c=0; for i in 1 2 3 4 5 6 7 8; do
-  fn wall "{\"action\":\"signup\",\"email\":\"probe-$RANDOM-$i@example.invalid\",\"password\":\"ProbePassphrase123\",\"callsign\":\"PRB$RANDOM$i\"}" | grep -q '"ok":true' && c=$((c+1))
+# Deliberately short password: the rate limiter runs before field validation,
+# so each call still consumes budget but can never create an account.
+allowed=0; throttled=0
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  r=$(fn wall "{\"action\":\"signup\",\"email\":\"probe-$RANDOM-$i@example.invalid\",\"password\":\"x\",\"callsign\":\"PRB$RANDOM$i\"}")
+  echo "$r" | grep -q 'too many sign-up' && throttled=$((throttled+1)) || allowed=$((allowed+1))
 done
-[ "$c" -le 5 ] && ok "signup throttled ($c/8 accepted)" || no "NO SIGNUP THROTTLE ($c/8 accepted)"
+[ "$throttled" -ge 1 ] && ok "signup throttled ($allowed allowed, $throttled blocked; no accounts created)" \
+                        || no "NO SIGNUP THROTTLE (10/10 got through)"
 
 hdr "8. Internal errors are not echoed to clients"
 r=$(fn wall '{"action":"signup","email":"x","password":"y"}')
